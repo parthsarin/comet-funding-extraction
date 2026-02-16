@@ -27,7 +27,7 @@ mkdir -p logs
 mkdir -p results
 
 # Activate conda environment
-source $(conda info --base)/etc/profile.d/conda.sh
+source /cm/shared/apps/Mambaforge/24.3.0-0/etc/profile.d/conda.sh
 conda activate comet-inference
 
 # Print environment info

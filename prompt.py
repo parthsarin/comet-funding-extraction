@@ -120,7 +120,7 @@ The European Research Council (ERC) gives each ‘Advanced Grant’ (award_title
 In summary, your task is to read the provided funding statement and extract the funder name, funding scheme, award IDs, and award titles according to the guidelines and special considerations outlined above. The output should be a JSON array that accurately captures the relationships between these components, even when they are presented in a variable order or contain ambiguous language."""
 
 
-SYSTEM_PROMPT_ON_ENTIRE_ARTICLE = SYSTEM_PROMPT_ON_FUNDING_STATEMENT = """You are an expert at reading funding statements and annotating their components. The user will provide a funding statement and your job is to annotate it with the correct components.
+SYSTEM_PROMPT_ON_ENTIRE_ARTICLE = """You are an expert at reading funding statements and annotating their components. The user will provide a funding statement and your job is to annotate it with the correct components.
 
 ### JSON Schema
 The output should be a JSON array where each element is an object with the following structure:

@@ -58,8 +58,11 @@ def load_dataset(path: str) -> list[dict]:
 
 
 def estimate_token_count(text: str) -> int:
-    """Rough estimate of token count (chars / 4)."""
-    return len(text) // 4
+    """
+    Conservative estimate of token count.
+    Using chars / 2.5 to be safe - actual ratio varies by content.
+    """
+    return int(len(text) / 2.5)
 
 
 def create_prompts(
@@ -77,6 +80,9 @@ def create_prompts(
     """
     prompts = []
     metadata = []
+    skipped_funding = 0
+    skipped_markdown = 0
+    truncated_markdown = 0
 
     for entry in data:
         doi = entry.get("doi", "unknown")
@@ -96,7 +102,7 @@ def create_prompts(
             system_tokens = estimate_token_count(SYSTEM_PROMPT_ON_FUNDING_STATEMENT)
             user_tokens = estimate_token_count(funding_statement)
 
-            if system_tokens + user_tokens < max_context_length - 1000:
+            if system_tokens + user_tokens < max_context_length - 2500:
                 prompts.append([
                     {"role": "system", "content": SYSTEM_PROMPT_ON_FUNDING_STATEMENT},
                     {"role": "user", "content": f"Please extract funding information from the following statement:\n\n{funding_statement}"}
@@ -106,13 +112,15 @@ def create_prompts(
                     "prompt_type": "funding_statement",
                     "expected": funders
                 })
+            else:
+                skipped_funding += 1
 
         # Prompt type 2: Full markdown
         if include_full_markdown and markdown:
             system_tokens = estimate_token_count(SYSTEM_PROMPT_ON_ENTIRE_ARTICLE)
             user_tokens = estimate_token_count(markdown)
 
-            if system_tokens + user_tokens < max_context_length - 1000:
+            if system_tokens + user_tokens < max_context_length - 2500:
                 prompts.append([
                     {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
                     {"role": "user", "content": f"Please extract funding information from the following article:\n\n{markdown}"}
@@ -123,19 +131,26 @@ def create_prompts(
                     "expected": funders
                 })
             else:
-                # Try truncating markdown to fit
-                available_tokens = max_context_length - system_tokens - 1500
-                truncated_markdown = markdown[:available_tokens * 4]  # Rough char estimate
+                # Try truncating markdown to fit (use conservative char estimate: tokens * 2)
+                available_tokens = max_context_length - system_tokens - 2000
+                if available_tokens > 1000:  # Only truncate if we have reasonable space
+                    truncated_text = markdown[:int(available_tokens * 2)]
+                    truncated_markdown += 1
 
-                prompts.append([
-                    {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
-                    {"role": "user", "content": f"Please extract funding information from the following article (truncated due to length):\n\n{truncated_markdown}"}
-                ])
-                metadata.append({
-                    "doi": doi,
-                    "prompt_type": "full_markdown_truncated",
-                    "expected": funders
-                })
+                    prompts.append([
+                        {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
+                        {"role": "user", "content": f"Please extract funding information from the following article (truncated due to length):\n\n{truncated_text}"}
+                    ])
+                    metadata.append({
+                        "doi": doi,
+                        "prompt_type": "full_markdown_truncated",
+                        "expected": funders
+                    })
+                else:
+                    skipped_markdown += 1
+
+    print(f"Prompt stats: {len(prompts)} created, {skipped_funding} funding skipped, "
+          f"{skipped_markdown} markdown skipped, {truncated_markdown} markdown truncated")
 
     return metadata, prompts
 

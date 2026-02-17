@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tqdm import tqdm
+from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from prompt import SYSTEM_PROMPT_ON_FUNDING_STATEMENT, SYSTEM_PROMPT_ON_ENTIRE_ARTICLE
@@ -57,16 +58,9 @@ def load_dataset(path: str) -> list[dict]:
     return data
 
 
-def estimate_token_count(text: str) -> int:
-    """
-    Conservative estimate of token count.
-    Using chars / 2.5 to be safe - actual ratio varies by content.
-    """
-    return int(len(text) / 2.5)
-
-
 def create_prompts(
     data: list[dict],
+    tokenizer: AutoTokenizer,
     max_context_length: int = 32768,
     include_funding_statement: bool = True,
     include_full_markdown: bool = True,
@@ -99,14 +93,14 @@ def create_prompts(
 
         # Prompt type 1: Funding statement only
         if include_funding_statement and funding_statement:
-            system_tokens = estimate_token_count(SYSTEM_PROMPT_ON_FUNDING_STATEMENT)
-            user_tokens = estimate_token_count(funding_statement)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT_ON_FUNDING_STATEMENT},
+                {"role": "user", "content": f"Please extract funding information from the following statement:\n\n{funding_statement}"}
+            ]
+            token_count = len(tokenizer.apply_chat_template(messages, tokenize=True))
 
-            if system_tokens + user_tokens < max_context_length - 2500:
-                prompts.append([
-                    {"role": "system", "content": SYSTEM_PROMPT_ON_FUNDING_STATEMENT},
-                    {"role": "user", "content": f"Please extract funding information from the following statement:\n\n{funding_statement}"}
-                ])
+            if token_count < max_context_length - 2048:  # Leave room for generation
+                prompts.append(messages)
                 metadata.append({
                     "doi": doi,
                     "prompt_type": "funding_statement",
@@ -117,35 +111,47 @@ def create_prompts(
 
         # Prompt type 2: Full markdown
         if include_full_markdown and markdown:
-            system_tokens = estimate_token_count(SYSTEM_PROMPT_ON_ENTIRE_ARTICLE)
-            user_tokens = estimate_token_count(markdown)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
+                {"role": "user", "content": f"Please extract funding information from the following article:\n\n{markdown}"}
+            ]
+            token_count = len(tokenizer.apply_chat_template(messages, tokenize=True))
 
-            if system_tokens + user_tokens < max_context_length - 2500:
-                prompts.append([
-                    {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
-                    {"role": "user", "content": f"Please extract funding information from the following article:\n\n{markdown}"}
-                ])
+            if token_count < max_context_length - 2048:  # Leave room for generation
+                prompts.append(messages)
                 metadata.append({
                     "doi": doi,
                     "prompt_type": "full_markdown",
                     "expected": funders
                 })
             else:
-                # Try truncating markdown to fit (use conservative char estimate: tokens * 2)
-                available_tokens = max_context_length - system_tokens - 2000
-                if available_tokens > 1000:  # Only truncate if we have reasonable space
-                    truncated_text = markdown[:int(available_tokens * 2)]
-                    truncated_markdown += 1
+                # Try truncating markdown to fit
+                # Binary search for the right truncation length
+                system_tokens = len(tokenizer.encode(SYSTEM_PROMPT_ON_ENTIRE_ARTICLE))
+                available_tokens = max_context_length - system_tokens - 2048 - 100  # buffer for chat template overhead
 
-                    prompts.append([
+                if available_tokens > 2000:
+                    # Estimate chars to keep (start conservative, ~2 chars per token)
+                    char_limit = available_tokens * 2
+                    truncated_text = markdown[:char_limit]
+
+                    messages = [
                         {"role": "system", "content": SYSTEM_PROMPT_ON_ENTIRE_ARTICLE},
                         {"role": "user", "content": f"Please extract funding information from the following article (truncated due to length):\n\n{truncated_text}"}
-                    ])
-                    metadata.append({
-                        "doi": doi,
-                        "prompt_type": "full_markdown_truncated",
-                        "expected": funders
-                    })
+                    ]
+                    # Verify it fits
+                    actual_tokens = len(tokenizer.apply_chat_template(messages, tokenize=True))
+
+                    if actual_tokens < max_context_length - 2048:
+                        truncated_markdown += 1
+                        prompts.append(messages)
+                        metadata.append({
+                            "doi": doi,
+                            "prompt_type": "full_markdown_truncated",
+                            "expected": funders
+                        })
+                    else:
+                        skipped_markdown += 1
                 else:
                     skipped_markdown += 1
 
@@ -533,6 +539,10 @@ def main():
         data = data[:args.limit]
         print(f"Limited to {len(data)} entries")
 
+    # Load tokenizer
+    print(f"Loading tokenizer for {args.model}...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
     # Create prompts
     include_funding = not args.full_markdown_only
     include_markdown = not args.funding_statement_only
@@ -540,6 +550,7 @@ def main():
     print(f"Creating prompts (funding_statement={include_funding}, full_markdown={include_markdown})...")
     metadata, prompts = create_prompts(
         data,
+        tokenizer=tokenizer,
         max_context_length=args.max_context_length,
         include_funding_statement=include_funding,
         include_full_markdown=include_markdown,

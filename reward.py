@@ -389,6 +389,20 @@ def calculate_reward(
     matched_count = 0
 
     for pred_funder in predicted:
+        # Handle malformed predictions (e.g., strings instead of dicts)
+        if not isinstance(pred_funder, dict):
+            funder_scores.append(0.0)
+            award_id_scores.append(0.0)
+            scheme_scores.append(0.0)
+            title_scores.append(0.0)
+            if verbose:
+                errors.append(MatchError(
+                    error_type="invalid_funder_format",
+                    message=f"Funder is not a dict",
+                    predicted=str(pred_funder)[:100]
+                ))
+            continue
+
         match_idx, funder_score = match_funder_to_expected(
             pred_funder, expected, used_expected, funder_threshold
         )

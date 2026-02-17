@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:2
 #SBATCH --mem=128G
-#SBATCH --time=12:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=logs/inference_%j.out
 #SBATCH --error=logs/inference_%j.err
 
@@ -47,7 +47,7 @@ python sample.py \
     --data-path data/train.jsonl \
     --output-path results/inference_results_${SLURM_JOB_ID}.json \
     --model Qwen/Qwen3-8B \
-    --k 5 \
+    --k 3 \
     --temperature 1.0 \
     --max-tokens 2048 \
     --max-model-len 32768 \

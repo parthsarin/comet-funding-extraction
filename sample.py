@@ -280,6 +280,9 @@ def process_results(
                 except json.JSONDecodeError as e:
                     parse_error = f"JSON decode error: {e}"
                     rewards.append(0.0)
+                except Exception as e:
+                    parse_error = f"Reward calculation error: {e}"
+                    rewards.append(0.0)
             else:
                 parse_error = "No JSON array found in response"
                 rewards.append(0.0)
@@ -573,16 +576,26 @@ def main():
         gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
-    # Process results
+    # Save raw responses immediately (before processing)
+    output_dir = Path(args.output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_output_path = args.output_path.replace(".json", "_raw.json")
+    print(f"\nSaving raw responses to {raw_output_path}...")
+    with open(raw_output_path, "w") as f:
+        json.dump({
+            "metadata": metadata,
+            "responses": responses,
+        }, f)
+    print("Raw responses saved!")
+
+    # Process results (with error handling)
     print("\nCalculating rewards...")
     entry_stats, aggregate_stats = process_results(metadata, responses, verbose=args.verbose)
 
     # Print statistics
     print_statistics(entry_stats, aggregate_stats, verbose=args.verbose)
 
-    # Save results
-    output_dir = Path(args.output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Save processed results
     save_results(entry_stats, aggregate_stats, args.output_path)
 
 

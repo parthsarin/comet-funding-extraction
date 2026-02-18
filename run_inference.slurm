@@ -47,9 +47,9 @@ python sample.py \
     --data-path data/train.jsonl \
     --output-path results/inference_results_${SLURM_JOB_ID}.json \
     --model Qwen/Qwen3-8B \
-    --k 3 \
+    --k 1 \
     --temperature 1.0 \
-    --max-tokens 2048 \
+    --max-tokens 32768 \
     --max-model-len 32768 \
     --tensor-parallel-size 2 \
     --gpu-memory-utilization 0.9 \

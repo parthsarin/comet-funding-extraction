@@ -260,6 +260,73 @@ def calculate_award_reward(
     return award_id_iou, scheme_score, title_score, errors
 
 
+def is_flat_schema(data: list[dict]) -> bool:
+    """
+    Detect if the data uses flat schema (award objects directly) vs nested schema (funder objects with awards).
+
+    Flat schema: [{"funding_scheme": [...], "award_ids": [...], "award_title": [...]}]
+    Nested schema: [{"funder_name": "...", "awards": [...]}]
+    """
+    if not data:
+        return False
+
+    first = data[0]
+    if not isinstance(first, dict):
+        return False
+
+    # Flat schema has award fields directly, no "awards" key
+    has_award_fields = any(k in first for k in ["funding_scheme", "award_ids", "award_title"])
+    has_awards_key = "awards" in first
+
+    return has_award_fields and not has_awards_key
+
+
+def normalize_to_nested_schema(data: list[dict]) -> list[dict]:
+    """
+    Convert flat schema to nested schema.
+
+    Flat schema items become awards under a funder with null name,
+    unless they have a "funder_name" field.
+    """
+    if not data or not is_flat_schema(data):
+        return data
+
+    result = []
+    for item in data:
+        # Check if this flat item has a funder_name field
+        funder_name = item.get("funder_name")
+
+        # Build the award object from flat fields
+        award = {
+            "funding_scheme": item.get("funding_scheme", []),
+            "award_ids": item.get("award_ids", []),
+            "award_title": item.get("award_title", []),
+        }
+
+        # Wrap in nested structure
+        result.append({
+            "funder_name": funder_name,
+            "awards": [award]
+        })
+
+    return result
+
+
+def extract_all_awards(funders: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    """Extract all award IDs, schemes, and titles from a list of funder objects."""
+    all_ids = []
+    all_schemes = []
+    all_titles = []
+
+    for funder in funders:
+        for award in funder.get("awards", []) or []:
+            all_ids.extend(award.get("award_ids", []) or [])
+            all_schemes.extend(award.get("funding_scheme", []) or [])
+            all_titles.extend(award.get("award_title", []) or [])
+
+    return all_ids, all_schemes, all_titles
+
+
 def calculate_reward(
     predicted: list[dict] | str,
     expected: list[dict] | str,
@@ -268,7 +335,8 @@ def calculate_reward(
     award_id_weight: float = 0.4,
     scheme_weight: float = 0.2,
     title_weight: float = 0.1,
-    funder_threshold: float = 70.0
+    funder_threshold: float = 70.0,
+    use_global_matching: bool = True,
 ) -> RewardResult:
     """
     Calculate reward for a prediction against ground truth.
@@ -335,6 +403,9 @@ def calculate_reward(
             total_predicted_funders=0,
             total_expected_funders=len(expected)
         )
+
+    # Normalize flat schema to nested schema if needed
+    predicted = normalize_to_nested_schema(predicted)
 
     total_predicted = len(predicted)
     total_expected = len(expected)
@@ -453,12 +524,27 @@ def calculate_reward(
                 expected=expected[idx].get("funder_name")
             ))
 
-    # Calculate average scores
+    # Calculate average scores from per-funder matching
     n_items = max(total_predicted, total_expected)
     avg_funder = sum(funder_scores) / n_items if funder_scores else 0.0
     avg_award_id = sum(award_id_scores) / n_items if award_id_scores else 0.0
     avg_scheme = sum(scheme_scores) / n_items if scheme_scores else 0.0
     avg_title = sum(title_scores) / n_items if title_scores else 0.0
+
+    # Global matching: compare all awards regardless of funder grouping
+    # This helps when model splits one funder's awards into multiple entries
+    if use_global_matching:
+        pred_ids, pred_schemes, pred_titles = extract_all_awards(predicted)
+        exp_ids, exp_schemes, exp_titles = extract_all_awards(expected)
+
+        global_award_id = calculate_set_iou(pred_ids, exp_ids, normalize_award_id)
+        global_scheme, _ = fuzzy_set_match(pred_schemes, exp_schemes)
+        global_title, _ = fuzzy_set_match(pred_titles, exp_titles)
+
+        # Use the better of per-funder or global matching for award components
+        avg_award_id = max(avg_award_id, global_award_id)
+        avg_scheme = max(avg_scheme, global_scheme)
+        avg_title = max(avg_title, global_title)
 
     # Calculate weighted total
     total_reward = (
@@ -491,16 +577,79 @@ def extract_json_from_response(response: str) -> str | None:
     Returns:
         Extracted JSON string or None if not found
     """
+    # Strip out <think>...</think> blocks first (used by some models for chain-of-thought)
+    cleaned_response = re.sub(r'<think>[\s\S]*?</think>', '', response)
+
     # Try to find JSON array in the response
     # Look for ```json blocks first
-    json_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', response)
+    json_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*\])\s*```', cleaned_response)
     if json_block_match:
-        return json_block_match.group(1)
+        try:
+            json.loads(json_block_match.group(1))
+            return json_block_match.group(1)
+        except json.JSONDecodeError:
+            pass
 
-    # Look for bare JSON array
-    json_match = re.search(r'\[[\s\S]*\]', response)
+    # Find all opening bracket positions and try to parse from each
+    # Start from the last one (output is typically at the end)
+    bracket_positions = [i for i, c in enumerate(cleaned_response) if c == '[']
+
+    best_empty_array = None  # Track empty arrays as fallback
+
+    for start_pos in reversed(bracket_positions):
+        # Find the matching closing bracket by counting
+        depth = 0
+        in_string = False
+        escape_next = False
+        end_pos = None
+
+        for i in range(start_pos, len(cleaned_response)):
+            c = cleaned_response[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if c == '\\' and in_string:
+                escape_next = True
+                continue
+
+            if c == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if c == '[':
+                depth += 1
+            elif c == ']':
+                depth -= 1
+                if depth == 0:
+                    end_pos = i + 1
+                    break
+
+        if end_pos:
+            candidate = cleaned_response[start_pos:end_pos]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, list):
+                    # Prefer non-empty arrays with dict elements (actual funder objects)
+                    if len(parsed) > 0 and isinstance(parsed[0], dict):
+                        return candidate
+                    # Track empty arrays as fallback (for legitimate "no funders" case)
+                    elif len(parsed) == 0 and best_empty_array is None:
+                        best_empty_array = candidate
+            except json.JSONDecodeError:
+                continue
+
+    # If we only found empty arrays, return one (legitimate "no funders" response)
+    if best_empty_array is not None:
+        return best_empty_array
+
+    # Fallback: try greedy match on cleaned response
+    json_match = re.search(r'\[[\s\S]*\]', cleaned_response)
     if json_match:
-        # Validate it's actually JSON
         try:
             json.loads(json_match.group(0))
             return json_match.group(0)

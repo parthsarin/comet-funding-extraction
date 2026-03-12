@@ -2,3 +2,8 @@
 .ropeproject
 .claude
 data
+__pycache__/
+checkpoints/
+logs/
+wandb/
+results/

@@ -42,6 +42,8 @@ def normalize_string(s: str) -> str:
     """Normalize a string for comparison."""
     if not s:
         return ""
+    if not isinstance(s, str):
+        s = str(s)
     # Lowercase, remove extra whitespace, strip
     s = s.lower().strip()
     s = re.sub(r'\s+', ' ', s)
@@ -481,6 +483,20 @@ def calculate_reward(
     )
 
 
+def strip_think_tags(text: str) -> str:
+    """
+    Remove <think>...</think> blocks from model responses.
+
+    Handles both closed tags and unclosed tags (where the model
+    started thinking but never closed the tag).
+    """
+    # Remove closed think tags
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+    # Remove unclosed think tags (everything from <think> to end)
+    text = re.sub(r'<think>[\s\S]*$', '', text)
+    return text.strip()
+
+
 def extract_json_from_response(response: str) -> str | None:
     """
     Extract JSON array from a model response that may contain other text.
@@ -491,6 +507,9 @@ def extract_json_from_response(response: str) -> str | None:
     Returns:
         Extracted JSON string or None if not found
     """
+    # Strip think tags before attempting JSON extraction
+    response = strip_think_tags(response)
+
     # Try to find JSON array in the response
     # Look for ```json blocks first
     json_block_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', response)
